@@ -1,50 +1,113 @@
-﻿using Excel = Microsoft.Office.Interop.Excel; // Excel kütüphanesi tanıtıldı, kısa isim olarak Excel verildi.
+﻿using ExcelMakroRunner;
+using Microsoft.Extensions.Configuration;
+using System.Runtime.InteropServices;
+using Excel = Microsoft.Office.Interop.Excel; // Excel kütüphanesine kısa isim verildi.
 
-Excel.Application excelApp = new Excel.Application(); // Windows üzerinde yeni bir Excel uygulaması örneği oluşturuldu.
+// finally bloğunda erişilebilmeleri için değişkenler try bloklarının dışında tanımlandı.
+string excelPath;
+string logPath;
+string[]? macros = null;
+Excel.Application? excelApp = null;
+Excel.Workbooks? workbooks = null;
+Excel.Workbook? workbook = null;
 
-excelApp.Visible = true; // Excel'in ekranda görünmesi sağlandı. Test için true, otomasyon için false yapılabilir.
+// settings.ini dosyasını okumak için yapılandırma oluşturuldu.
+IConfiguration configuration = new ConfigurationBuilder()
+    .SetBasePath(AppContext.BaseDirectory) // Programın çalıştığı klasör seçildi.
+    .AddIniFile("settings.ini", optional: false, reloadOnChange: true) // settings.ini dosyası eklendi.
+    .Build(); // Yapılandırma hazırlandı.
 
-string ExcelPath = @"C:\Users\pekta\Desktop\ExcelMakroFile\ExcelMakroFile"; // Açılacak Excel dosyasının yolu belirlendi.
-
-Excel.Workbook workbook = excelApp.Workbooks.Open(ExcelPath); // Belirtilen Excel dosyası açıldı.
-
-Console.WriteLine("Excel açıldı.");
-
+// 1. Aşama: Ayarlar Excel açılmadan önce okunur ve doğrulanır.
 try
 {
-    // Excel içerisindeki RenkDegistiren1 isimli makroyu çalıştırır.
-    excelApp.Run("RenkDegistiren1");
-    Console.WriteLine("RenkDegistiren1 çalıştırıldı.");
+    // Hataların dosyaya yazılabilmesi için önce log klasörü okunur ve Logger başlatılır.
+    logPath = configuration["General:LogPath"]
+        ?? throw new Exception("settings.ini dosyasında LogPath anahtarı bulunamadı.");
+    Logger.Initialize(logPath);
 
-    // İkinci makroyu çalıştırır.
-    excelApp.Run("RenkDegistiren2");
-    Console.WriteLine("RenkDegistiren2 çalıştırıldı.");
+    // Çalıştırılacak makroların listesi okunur.
+    macros = configuration
+        .GetSection("Macros") // Macros bölümü seçildi.
+        .Get<string[]>() // Liste string dizisine dönüştürüldü.
+        ?? throw new Exception("settings.ini dosyasında Macros anahtarı bulunamadı.");
 
-    // Üçüncü makroyu çalıştırır.
-    excelApp.Run("RenkDegistiren3");
-    Console.WriteLine("RenkDegistiren3 çalıştırıldı.");
-
-    // Dördüncü ve son makroyu çalıştırır.
-    excelApp.Run("RenkDegistiren4");
-    Console.WriteLine("RenkDegistiren4 çalıştırıldı.");
+    // Açılacak Excel dosyasının yolu okunur.
+    excelPath = configuration["General:ExcelPath"]
+        ?? throw new Exception("settings.ini dosyasında ExcelPath anahtarı bulunamadı.");
 }
 catch (Exception ex)
 {
-    // try bloğu içerisinde herhangi bir hata oluşursa program buraya gelir.
-    Console.WriteLine("Hata oluştu.");
-
-    // ex nesnesi oluşan hata hakkındaki bilgileri tutar.
+    // Logger başlatılamamış olabileceği için hata konsola yazılır.
+    Console.WriteLine("Ayarlar okunurken hata oluştu.");
     Console.WriteLine(ex.Message);
+
+    // Görev Zamanlayıcı'nın çalıştırmayı başarısız görmesi için çıkış kodu 1 yapılır.
+    Environment.ExitCode = 1;
+
+    // Excel hiç açılmadan program sonlandırılır.
+    return;
+}
+
+// 2. Aşama: Excel açılır ve makrolar çalıştırılır.
+try
+{
+    // Arka planda yeni bir Excel uygulaması başlatıldı.
+    excelApp = new Excel.Application();
+
+    // Excel kullanıcıya görünmeden çalışır.
+    excelApp.Visible = false;
+    excelApp.DisplayAlerts = false;
+    // "İki nokta" kuralı: Workbooks koleksiyonu serbest bırakılabilmesi için ayrı değişkende tutulur.
+    workbooks = excelApp.Workbooks;
+
+    // Excel dosyası açıldı.
+    workbook = workbooks.Open(excelPath);
+    Logger.Log("Excel açıldı.");
+
+    // Tüm makrolar sırayla çalıştırılır.
+    foreach (string macro in macros)
+    {
+        Logger.Log($"Makro çalıştırılıyor: {macro}");
+        excelApp.Run(macro);
+        Logger.Log($"Makro çalıştırıldı: {macro}");
+    }
+}
+catch (Exception ex)
+{
+    // Görev Zamanlayıcı'nın çalıştırmayı başarısız görmesi için çıkış kodu 1 yapılır.
+    Environment.ExitCode = 1;
+
+    // Hata, satır bilgisiyle birlikte loglanır.
+    Logger.Log("Hata oluştu.");
+    Logger.Log(ex.ToString());
 }
 finally
 {
-    // finally bloğu hata oluşsa da oluşmasa da çalışır.
+    // Önce Excel'e kapanması söylenir.
+    // Kaynak dosyanın değişmemesi için çalışma kitabı kaydedilmeden kapatılır (bilinçli karar).
+    if (workbook != null)
+    {
+        workbook.Close(false);
+    }
+    if (excelApp != null)
+    {
+        excelApp.Quit();
+    }
 
-    // Açılan Excel çalışma kitabını kaydederek kapatması için true verilmeli, test aşamasında false verildi.
-    workbook.Close(false);
+    // Ardından COM nesneleri, oluşturulma sırasının tersine serbest bırakılır.
+    // Böylece arka planda EXCEL.EXE süreci açık kalmaz.
+    if (workbook != null)
+    {
+        Marshal.ReleaseComObject(workbook);
+    }
+    if (workbooks != null)
+    {
+        Marshal.ReleaseComObject(workbooks);
+    }
+    if (excelApp != null)
+    {
+        Marshal.ReleaseComObject(excelApp);
+    }
 
-    // C# tarafından başlatılan Excel uygulamasını kapatır.
-    excelApp.Quit();
-
-    Console.WriteLine("Excel kapatıldı.");
+    Logger.Log("Excel kapatıldı.");
 }
